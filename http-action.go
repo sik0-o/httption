@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -28,6 +29,7 @@ var (
 )
 
 type BaseAction struct {
+	name string
 	// Callbacks
 	// beforeAction []HttpAction
 	// afterAction  []HttpAction
@@ -48,8 +50,10 @@ type BaseAction struct {
 	statusCodeHandlers map[int]StatusCodeHandlerFunc
 
 	// Retry
-	tryCount  uint
-	needRetry bool
+	tryCount   uint
+	maxRetry   uint
+	needRetry  bool
+	retryDelay time.Duration
 
 	// Misc
 	err error
@@ -135,14 +139,38 @@ func (ba *BaseAction) Do(opts ...Option) error {
 		return err
 	}
 
+	var retry bool
+
 	// Next just make a do
-	if err := ba.do(); err != nil && !ba.needRetry {
-		ba.log(zap.ErrorLevel, "action Do() do", zap.Error(err))
-		// throw error if retry do not need
-		return err
+	for {
+		if ba.maxRetry > 0 {
+			retry = ba.tryCount <= ba.maxRetry
+		} else {
+			retry = false
+		}
+		err := ba.do()
+
+		if err == nil {
+			retry = false
+			// no errors -> quit cycle.
+			break
+		} else {
+			// when error and we have no retry -> throw error
+			ba.log(zap.ErrorLevel, "action Do() do", zap.Error(err))
+			// exit when no retry
+			if !retry {
+				return err
+			}
+		}
+		// else process again
+		if ba.retryDelay > 0 {
+			ba.log(zap.DebugLevel, "waiting before retry", zap.Duration("delay", ba.retryDelay))
+			<-time.After(ba.retryDelay)
+		}
 	}
 
 	// repeat an action if retry is need
+	// it happpend when success action need a repeat
 	if ba.needRetry {
 		return ba.Repeat(false)
 	}
@@ -155,13 +183,15 @@ func (ba *BaseAction) log(lvl zapcore.Level, msg string, fields ...zap.Field) {
 		return
 	}
 
+	fields = append([]zap.Field{zap.String("action_name", ba.name)}, fields...)
+
 	ba.logger.Log(lvl, msg, fields...)
 }
 
 var ErrEmptyRequest = errors.New("action request is empty. Do Setup() method before action request performed")
 
 func (ba *BaseAction) do() error {
-	ba.log(zap.DebugLevel, "do action")
+
 	ba.tryCount++
 	// if len(ha.beforeAction) > 0 {
 	// 	for _, bact := range ha.beforeAction {
@@ -170,6 +200,8 @@ func (ba *BaseAction) do() error {
 	// 		}
 	// 	}
 	// }
+
+	ba.log(zap.DebugLevel, "do action", zap.Uint("attempt", ba.tryCount))
 
 	if ba.request == nil {
 		return ErrEmptyRequest
