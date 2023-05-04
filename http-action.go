@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // HttpAction is an interface to perform http requests and handle its responses.
@@ -24,25 +27,32 @@ var (
 	ErrTooManyRequests     = errors.New("Too many requests")
 )
 
-const DISCORD_API_BASE = "https://discord.com/api/v9"
-
 type BaseAction struct {
-	beforeAction []HttpAction
-	afterAction  []HttpAction
+	// Callbacks
+	// beforeAction []HttpAction
+	// afterAction  []HttpAction
 
-	method string
-	url    string
-
-	resp *http.Response
-
+	// HTTP-params
+	client             *http.Client
+	method             string
+	url                string
+	request            *http.Request
+	response           *http.Response
 	requestBodyBuffer  []byte
 	responseBodyBuffer []byte
+	headers            map[string]string
 
-	headers map[string]string
+	logger *zap.Logger
 
+	// Response Handlers
+	statusCodeHandlers map[int]StatusCodeHandlerFunc
+
+	// Retry
+	tryCount  uint
+	needRetry bool
+
+	// Misc
 	err error
-
-	client *http.Client
 }
 
 func NewHttpAction(client *http.Client, method string, url string) HttpAction {
@@ -50,91 +60,146 @@ func NewHttpAction(client *http.Client, method string, url string) HttpAction {
 }
 
 func NewBaseAction(client *http.Client, method string, url string) *BaseAction {
+	l, _ := zap.NewDevelopment()
+
 	return &BaseAction{
-		beforeAction: []HttpAction{},
-		afterAction:  []HttpAction{},
+		// beforeAction: []HttpAction{},
+		// afterAction:  []HttpAction{},
 
 		method: method,
 		url:    url,
 
 		client:  client,
 		headers: make(map[string]string),
+
+		logger: l,
 	}
 }
 
-func (ba *BaseAction) setupProxy(proxyURL *url.URL) error {
-	switch t := ba.client.Transport.(type) {
-	case *http.Transport:
-		t.Proxy = http.ProxyURL(proxyURL)
-	default:
-		return errors.New("BaseAction.setupProxy() cannot set proxy because transport has unknown type")
+func (ba *BaseAction) SetLogger(logger *zap.Logger) {
+	ba.logger = logger
+}
+
+func (ba *BaseAction) Logger() *zap.Logger {
+	return ba.logger
+}
+
+// Setup do an option setup than prepare action http-request if it not build previously
+func (ba *BaseAction) Setup(opts ...Option) error {
+	for _, opt := range opts {
+		if err := opt(ba); err != nil {
+			return err
+		}
+	}
+
+	if ba.request == nil {
+		req, err := prepareRequest(ba.method, ba.url, ba.requestBodyBuffer, ba.headers)
+		ba.err = err
+		if err != nil {
+			return err
+		}
+
+		ba.request = req
 	}
 
 	return nil
 }
 
-func (ha *BaseAction) Do(opts ...Option) error {
-	var err error
-	var tryN uint
-
-	for {
-		tryN++
-		retry := false
-		isRetry := tryN > 1
-
-		err = ha.do(isRetry, opts...)
-		if err != nil {
-			// check retry
-			if err == ErrTooManyRequests {
-				retry = true
-			}
-		}
-
-		if !retry {
-			break
-		}
+// Repeat method repeats the http request.
+func (ba *BaseAction) Repeat(setupAction bool, opts ...Option) error {
+	ba.log(zap.DebugLevel, "action Repeat() Setup")
+	if err := ba.Setup(opts...); err != nil {
+		ba.log(zap.ErrorLevel, "action Repeat() Setup", zap.Error(err))
+		return err
 	}
+	ba.log(zap.DebugLevel, "action Repeat() do")
 
-	return err
+	return ba.do()
 }
 
-func (ha *BaseAction) do(noSetup bool, opts ...Option) error {
-	if !noSetup {
-		for _, opt := range opts {
-			if err := opt(ha); err != nil {
-				return err
-			}
-		}
+func (ba *BaseAction) SetupProxyURL(proxyURL *url.URL) error {
+	switch t := ba.client.Transport.(type) {
+	case *http.Transport:
+		t.Proxy = http.ProxyURL(proxyURL)
+	default:
+		return errors.New("BaseAction.SetupProxy() cannot set proxy because transport has unknown type")
 	}
 
-	if len(ha.beforeAction) > 0 {
-		for _, bact := range ha.beforeAction {
-			if err := bact.Do(opts...); err != nil {
-				return err
-			}
-		}
-	}
+	return nil
+}
 
-	req, err := prepareRequest(ha.method, ha.url, ha.requestBodyBuffer, ha.headers)
-	ha.err = err
-	if err != nil {
+func (ba *BaseAction) Do(opts ...Option) error {
+	ba.log(zap.DebugLevel, "action Do() Setup")
+	if err := ba.Setup(opts...); err != nil {
+		ba.log(zap.ErrorLevel, "action Do() Setup", zap.Error(err))
 		return err
 	}
 
-	resp, err := ha.client.Do(req)
-	ha.err = err
+	// Next just make a do
+	if err := ba.do(); err != nil && !ba.needRetry {
+		ba.log(zap.ErrorLevel, "action Do() do", zap.Error(err))
+		// throw error if retry do not need
+		return err
+	}
+
+	// repeat an action if retry is need
+	if ba.needRetry {
+		return ba.Repeat(false)
+	}
+
+	return nil
+}
+
+func (ba *BaseAction) log(lvl zapcore.Level, msg string, fields ...zap.Field) {
+	if ba.logger == nil {
+		return
+	}
+
+	ba.logger.Log(lvl, msg, fields...)
+}
+
+var ErrEmptyRequest = errors.New("action request is empty. Do Setup() method before action request performed")
+
+func (ba *BaseAction) do() error {
+	ba.log(zap.DebugLevel, "do action")
+	ba.tryCount++
+	// if len(ha.beforeAction) > 0 {
+	// 	for _, bact := range ha.beforeAction {
+	// 		if err := bact.Do(opts...); err != nil {
+	// 			return err
+	// 		}
+	// 	}
+	// }
+
+	if ba.request == nil {
+		return ErrEmptyRequest
+	}
+
+	ba.log(zap.DebugLevel, "sending request")
+	resp, err := ba.client.Do(ba.request)
+	ba.err = err
 	if err != nil {
 		return err
 	}
-	ha.resp = resp
+	ba.log(zap.DebugLevel, "response received")
+	ba.response = resp
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
+	ba.log(zap.DebugLevel, "response body read")
+
+	if ba.statusCodeHandlers != nil {
+		if statusHandler, ok := ba.statusCodeHandlers[resp.StatusCode]; ok {
+			if statusHandler(ba.client) {
+				return errors.New("resp.statusHandler")
+			}
+		}
+	}
 
 	err = handleResponse(resp, respBody)
-	ha.err = err
+	ba.err = err
 	if err != nil {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			return ErrTooManyRequests
@@ -143,15 +208,17 @@ func (ha *BaseAction) do(noSetup bool, opts ...Option) error {
 		return err
 	}
 
-	ha.responseBodyBuffer = respBody
+	ba.responseBodyBuffer = respBody
 
-	if len(ha.afterAction) > 0 {
-		for _, aact := range ha.afterAction {
-			if err := aact.Do(opts...); err != nil {
-				return err
-			}
-		}
-	}
+	ba.log(zap.DebugLevel, "response handled")
+
+	// if len(ha.afterAction) > 0 {
+	// 	for _, aact := range ha.afterAction {
+	// 		if err := aact.Do(opts...); err != nil {
+	// 			return err
+	// 		}
+	// 	}
+	// }
 
 	return nil
 }
@@ -161,7 +228,7 @@ func (ha *BaseAction) Result(result interface{}) error {
 		return nil
 	}
 
-	if ha.resp.Header.Get("content-type") == "application/json" {
+	if ha.response.Header.Get("content-type") == "application/json" {
 		if err := json.Unmarshal(ha.responseBodyBuffer, result); err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package httption
 
 import (
+	"net/http"
 	"net/url"
 )
 
@@ -16,6 +17,16 @@ func WithHeaders(headers map[string]string) Option {
 
 func WithProxyURL(proxyURL *url.URL) Option {
 	return func(ba *BaseAction) error {
-		return ba.setupProxy(proxyURL)
+		return ba.SetupProxyURL(proxyURL)
+	}
+}
+
+type StatusCodeHandlerFunc func(client *http.Client) bool
+
+func WithStatusCodeHandler(code int, h StatusCodeHandlerFunc) Option {
+	return func(ba *BaseAction) error {
+		ba.statusCodeHandlers[code] = h
+
+		return nil
 	}
 }
