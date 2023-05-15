@@ -28,6 +28,8 @@ var (
 	ErrTooManyRequests     = errors.New("Too many requests")
 )
 
+var ErrEmptyRequest = errors.New("action request is empty. Do Setup() method before action request performed")
+
 type BaseAction struct {
 	name string
 	// Callbacks
@@ -80,12 +82,31 @@ func NewBaseAction(client *http.Client, method string, url string) *BaseAction {
 	}
 }
 
+func (ba *BaseAction) Name() string {
+	return ba.name
+}
+
+func (ba *BaseAction) SetupProxyURL(proxyURL *url.URL) error {
+	switch t := ba.client.Transport.(type) {
+	case *http.Transport:
+		t.Proxy = http.ProxyURL(proxyURL)
+	default:
+		return errors.New("BaseAction.SetupProxy() cannot set proxy because transport has unknown type")
+	}
+
+	return nil
+}
+
 func (ba *BaseAction) SetLogger(logger *zap.Logger) {
 	ba.logger = logger
 }
 
 func (ba *BaseAction) Logger() *zap.Logger {
 	return ba.logger
+}
+
+func (ha *BaseAction) SetHeaders(headers map[string]string) {
+	ha.headers = headers
 }
 
 // Setup do an option setup than prepare action http-request if it not build previously
@@ -119,17 +140,6 @@ func (ba *BaseAction) Repeat(setupAction bool, opts ...Option) error {
 	ba.log(zap.DebugLevel, "action Repeat() do")
 
 	return ba.do()
-}
-
-func (ba *BaseAction) SetupProxyURL(proxyURL *url.URL) error {
-	switch t := ba.client.Transport.(type) {
-	case *http.Transport:
-		t.Proxy = http.ProxyURL(proxyURL)
-	default:
-		return errors.New("BaseAction.SetupProxy() cannot set proxy because transport has unknown type")
-	}
-
-	return nil
 }
 
 func (ba *BaseAction) Do(opts ...Option) error {
@@ -178,17 +188,27 @@ func (ba *BaseAction) Do(opts ...Option) error {
 	return nil
 }
 
-func (ba *BaseAction) log(lvl zapcore.Level, msg string, fields ...zap.Field) {
-	if ba.logger == nil {
-		return
+func (ha *BaseAction) Result(result interface{}) error {
+	if ha.responseBodyBuffer == nil {
+		return nil
 	}
 
-	fields = append([]zap.Field{zap.String("action_name", ba.name)}, fields...)
+	if ha.response.Header.Get("content-type") == "application/json" {
+		if err := json.Unmarshal(ha.responseBodyBuffer, result); err != nil {
+			return err
+		}
+	}
 
-	ba.logger.Log(lvl, msg, fields...)
+	return nil
 }
 
-var ErrEmptyRequest = errors.New("action request is empty. Do Setup() method before action request performed")
+func (ha *BaseAction) Error() error {
+	return ha.err
+}
+
+func (ha *BaseAction) ResponseBytes() []byte {
+	return ha.responseBodyBuffer
+}
 
 func (ba *BaseAction) do() error {
 
@@ -255,32 +275,6 @@ func (ba *BaseAction) do() error {
 	return nil
 }
 
-func (ha *BaseAction) Result(result interface{}) error {
-	if ha.responseBodyBuffer == nil {
-		return nil
-	}
-
-	if ha.response.Header.Get("content-type") == "application/json" {
-		if err := json.Unmarshal(ha.responseBodyBuffer, result); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (ha *BaseAction) Error() error {
-	return ha.err
-}
-
-func (ha *BaseAction) SetHeaders(headers map[string]string) {
-	ha.headers = headers
-}
-
-func (ha *BaseAction) ResponseBytes() []byte {
-	return ha.responseBodyBuffer
-}
-
 func prepareRequest(method string, url string, bodyBytes []byte, headers map[string]string) (*http.Request, error) {
 	var bodyReader io.Reader
 	if bodyBytes != nil {
@@ -338,4 +332,14 @@ func handleResponse(resp *http.Response, respBody []byte) error {
 	}
 
 	return nil
+}
+
+func (ba *BaseAction) log(lvl zapcore.Level, msg string, fields ...zap.Field) {
+	if ba.logger == nil {
+		return
+	}
+
+	fields = append([]zap.Field{zap.String("action_name", ba.name)}, fields...)
+
+	ba.logger.Log(lvl, msg, fields...)
 }
