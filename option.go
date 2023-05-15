@@ -18,9 +18,39 @@ func WithHeaders(headers map[string]string) Option {
 	}
 }
 
+func WithAppendHeaders(headers map[string]string) Option {
+	return func(ba *BaseAction) error {
+		ba.headers = mergedMaps(ba.headers, headers)
+
+		return nil
+	}
+}
+
+func WithPrependHeaders(headers map[string]string) Option {
+	return func(ba *BaseAction) error {
+		ba.headers = mergedMaps(headers, ba.headers)
+
+		return nil
+	}
+}
+
 func WithProxyURL(proxyURL *url.URL) Option {
 	return func(ba *BaseAction) error {
 		return ba.SetupProxyURL(proxyURL)
+	}
+}
+
+func WithBodyString(body string) Option {
+	return func(ba *BaseAction) error {
+		ba.requestBodyBuffer = []byte(body)
+		return nil
+	}
+}
+
+func WithBodyBytes(body []byte) Option {
+	return func(ba *BaseAction) error {
+		ba.requestBodyBuffer = body
+		return nil
 	}
 }
 
