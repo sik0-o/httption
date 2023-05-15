@@ -86,6 +86,10 @@ func (ba *BaseAction) Name() string {
 	return ba.name
 }
 
+type ProxiedTransport interface {
+	SetProxy(proxyURL *url.URL) error
+}
+
 func (ba *BaseAction) SetupProxyURL(proxyURL *url.URL) error {
 	switch t := ba.client.Transport.(type) {
 	case *http.Transport:
