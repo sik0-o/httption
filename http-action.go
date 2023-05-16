@@ -94,6 +94,8 @@ func (ba *BaseAction) SetupProxyURL(proxyURL *url.URL) error {
 	switch t := ba.client.Transport.(type) {
 	case *http.Transport:
 		t.Proxy = http.ProxyURL(proxyURL)
+	case ProxiedTransport:
+		return t.SetProxy(proxyURL)
 	default:
 		return errors.New("BaseAction.SetupProxy() cannot set proxy because transport has unknown type")
 	}

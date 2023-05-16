@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 
 	"go.uber.org/zap"
 )
@@ -48,6 +49,18 @@ func (lrt LoggingRoundTripper) RoundTrip(req *http.Request) (res *http.Response,
 	}
 
 	return
+}
+
+// implement of httption.ProxiedTransport
+func (lrt LoggingRoundTripper) SetProxy(proxyURL *url.URL) error {
+	switch t := lrt.Proxied.(type) {
+	case *http.Transport:
+		t.Proxy = http.ProxyURL(proxyURL)
+	default:
+		return errors.New("LoggingRoundTripper.SetProxy() cannot set proxy because transport has unknown type")
+	}
+
+	return nil
 }
 
 // bodyAllowedForStatus reports whether a given response status code
